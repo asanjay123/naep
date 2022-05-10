@@ -1,0 +1,78 @@
+import os
+import datetime
+import time
+from collections import OrderedDict
+
+import pandas as pd
+import numpy as np
+
+
+def time_fmt(val):
+    day, hour = val.split(' ')
+    day, month, year = day.split('.')
+    hour, minute, second = hour.split(':')
+    dt = datetime.datetime(int(year), int(month), int(day), int(hour), int(minute), int(second))
+    return int(time.mktime(dt.timetuple()))
+
+
+def add_functionals(base_name, feature_vals, row_dict):
+    row_dict[base_name + '_mean'] = np.mean(feature_vals)
+    row_dict[base_name + '_stddev'] = np.std(feature_vals)
+    row_dict[base_name + '_coeffvar'] = np.std(feature_vals) / (np.mean(feature_vals) + .0000001)
+    row_dict[base_name + '_25per'] = np.percentile(feature_vals, 25)
+    row_dict[base_name + '_75per'] = np.percentile(feature_vals,  75)
+
+
+header = ['session_num', 'student_id', 'exercise_id', 'activity', 'start_time', 'end_time',
+          'idle_time_ms', 'mouse_wheel', 'mouse_wheel_clicks', 'mouse_clicks_left',
+          'mouse_clicks_right', 'mouse_movements', 'keystrokes']
+
+# Extract features from each session ("process").
+base_dir = 'data/uci_epm_dataset/Data/Processes/'
+rows = []
+for sesh in sorted(os.listdir(base_dir)):
+    print('Processing ' + str(sesh))
+    for fname in sorted(os.listdir(base_dir + sesh)):
+        df = pd.read_csv(base_dir + sesh + '/' + fname, sep=', ', names=header, engine='python',
+                         converters={'end_time': time_fmt, 'start_time': time_fmt})
+        df['activity_length'] = (df.end_time - df.start_time) / 60
+        df['exercise_num'] = df.exercise_id.str[5:].replace('', 0)
+        df['activity'] = df.activity.str.lower()
+        df['activity_name'] = df.activity.str.replace(r'_.*', '')
+        rows.append(OrderedDict())
+        rows[-1]['student_id'] = 'student' + str(df.student_id.iloc[0])
+        rows[-1]['session_id'] = 'session' + str(df.session_num.iloc[0])
+        rows[-1]['num_exercises'] = len(df.exercise_num.unique())
+        total_time = df.activity_length.sum()
+        for act in sorted(df.activity_name.unique()):
+            rows[-1][act + '_time_prop'] = \
+                df[df.activity_name == act].activity_length.sum() / total_time
+        for col in ['activity_length', 'mouse_wheel', 'mouse_wheel_clicks', 'mouse_clicks_left',
+                    'mouse_clicks_right', 'mouse_movements', 'keystrokes']:
+            add_functionals(col, df[col].values, rows[-1])
+
+df = pd.DataFrame.from_records(rows).fillna(0)  # _time_prop NaN should be 0.
+for f in df:
+    if len(df[f].unique()) < 5:
+        print('Removing feature due to little variance: ' + f)
+        df.drop(columns=f, inplace=True)
+
+# Log-transform features to get reasonable, somewhat similar scales.
+for f in df:
+    if not f.endswith('_id') and not f.endswith('_prop'):
+        df[f] = np.log(1 + df[f].values)
+
+print('Adding intermediate grades labels')
+grades = pd.read_excel('data/uci_epm_dataset/Data/intermediate_grades.xlsx')
+grades['Student Id'] = 'student' + grades['Student Id'].astype(str)
+matched_vals = []
+for i, row in df.iterrows():
+    match = grades[grades['Student Id'] == row.student_id]
+    assert len(match) == 1
+    matched_vals.append('')
+    if row.session_id != 'session1':  # No session 1 grades.
+        matched_vals[-1] = match['Session ' + row.session_id[-1]].iloc[0]
+df.insert(2, 'session_grade', matched_vals)
+
+print('Saving result')
+df.to_csv('data/uci_epm_dataset/engineered_features.csv', index=False)
